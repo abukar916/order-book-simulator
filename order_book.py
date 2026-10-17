@@ -1,140 +1,168 @@
-import heapq
-import streamlit as st
+"""Streamlit front end for the limit order book simulator.
+
+Run with:  streamlit run order_book.py
+
+All matching logic lives in ``matching_engine.py``; this file only handles
+input, display and export.
+"""
+
+from dataclasses import asdict
+
 import pandas as pd
+import streamlit as st
 
-class Order:
-    def __init__(self, order_id, side, price, quantity):
-        self.order_id = order_id
-        self.side = side
-        self.price = price
-        self.quantity = quantity
+from matching_engine import BUY, SELL, OrderBook, OrderResult
 
-class OrderBook:
-    def __init__(self):
-        self.buys = []
-        self.sells = []
-        self.order_id_counter = 0
-        self.order_map = {}
-        self.trades = []  # For trade log
+SAMPLE_ORDERS = [
+    (BUY, 99, 10),
+    (BUY, 99, 5),
+    (BUY, 98, 15),
+    (BUY, 97, 20),
+    (SELL, 101, 8),
+    (SELL, 101, 4),
+    (SELL, 102, 12),
+    (SELL, 103, 20),
+]
 
-    def add_order(self, side, price, quantity):
-        order = Order(self.order_id_counter, side, price, quantity)
-        self.order_id_counter += 1
-        self.order_map[order.order_id] = order
-        self.match(order)
-
-    def match(self, order):
-        if order.price is None:
-            order.price = float('inf') if order.side == 'buy' else 0.0
-
-        if order.side == 'buy':
-            while self.sells and order.quantity > 0:
-                best_sell_price, sell_order = self.sells[0]
-                if sell_order.price <= order.price:
-                    trade_qty = min(order.quantity, sell_order.quantity)
-                    st.write(f"Trade executed: BUY {trade_qty} @ {sell_order.price}")
-                    self.trades.append({'side': 'BUY', 'price': sell_order.price, 'quantity': trade_qty})
-                    order.quantity -= trade_qty
-                    sell_order.quantity -= trade_qty
-                    if sell_order.quantity == 0:
-                        heapq.heappop(self.sells)
-                        self.order_map.pop(sell_order.order_id, None)
-                else:
-                    break
-            if order.quantity > 0:
-                heapq.heappush(self.buys, (-order.price, order))
-        else:
-            while self.buys and order.quantity > 0:
-                best_buy_price, buy_order = self.buys[0]
-                best_buy_price = -best_buy_price
-                if buy_order.price >= order.price:
-                    trade_qty = min(order.quantity, buy_order.quantity)
-                    st.write(f"Trade executed: SELL {trade_qty} @ {buy_order.price}")
-                    self.trades.append({'side': 'SELL', 'price': buy_order.price, 'quantity': trade_qty})
-                    order.quantity -= trade_qty
-                    buy_order.quantity -= trade_qty
-                    if buy_order.quantity == 0:
-                        heapq.heappop(self.buys)
-                        self.order_map.pop(buy_order.order_id, None)
-                else:
-                    break
-            if order.quantity > 0:
-                heapq.heappush(self.sells, (order.price, order))
-
-    def cancel_order(self, order_id):
-        order = self.order_map.pop(order_id, None)
-        if order:
-            order.quantity = 0
-            st.write(f"Order {order_id} cancelled.")
-        else:
-            st.write(f"Order {order_id} not found.")
-
-    def get_book(self):
-        buys_sorted = sorted([(-price, order) for price, order in self.buys if order.quantity > 0], reverse=True)
-        sells_sorted = sorted([(price, order) for price, order in self.sells if order.quantity > 0])
-        return buys_sorted, sells_sorted
-
-    def get_best_bid_ask(self):
-        best_bid = -self.buys[0][0] if self.buys else None
-        best_ask = self.sells[0][0] if self.sells else None
-        return best_bid, best_ask
-
-# Streamlit UI
+st.set_page_config(page_title="Limit Order Book Simulator", layout="wide")
 st.title("Limit Order Book Simulator")
+st.caption(
+    "Orders match by price priority, then time priority. "
+    "Trades execute at the resting order's price."
+)
 
-if 'order_book' not in st.session_state:
+if "order_book" not in st.session_state:
     st.session_state.order_book = OrderBook()
+book: OrderBook = st.session_state.order_book
 
-option = st.selectbox("Choose action", ["Place Limit Order", "Place Market Order", "Cancel Order"])
 
-if option == "Place Limit Order":
-    side = st.selectbox("Side", ["buy", "sell"])
-    price = st.number_input("Price", min_value=0.0, step=1.0)
-    qty = st.number_input("Quantity", min_value=1, step=1)
-    if st.button("Submit Limit Order"):
-        st.session_state.order_book.add_order(side, price, qty)
+def show_result(result: OrderResult) -> None:
+    """Tell the user what happened to the order they just submitted."""
+    order = result.order
+    kind = "market" if order.is_market else f"limit @ {order.price:,.2f}"
+    head = f"Order {order.order_id} ({order.side} {order.quantity} {kind})"
+    outcome = result.outcome
+    if outcome == "filled":
+        st.success(f"{head}: fully filled in {len(result.trades)} trade(s).")
+    elif outcome == "partially_filled":
+        st.info(f"{head}: {result.filled_quantity} filled, {order.remaining} resting in the book.")
+    elif outcome == "resting":
+        st.info(f"{head}: no match, now resting in the book.")
+    elif result.trades:  # market order that ran out of liquidity
+        st.warning(
+            f"{head}: {result.filled_quantity} filled, "
+            f"{order.remaining} cancelled (no more liquidity)."
+        )
+    else:
+        st.warning(f"{head}: nothing to match against, so it was cancelled.")
 
-elif option == "Place Market Order":
-    side = st.selectbox("Side", ["marketbuy", "marketsell"])
-    qty = st.number_input("Quantity", min_value=1, step=1)
-    if st.button("Submit Market Order"):
-        side_actual = 'buy' if side == 'marketbuy' else 'sell'
-        st.session_state.order_book.add_order(side_actual, None, qty)
 
-elif option == "Cancel Order":
-    order_id = st.number_input("Order ID to cancel", min_value=0, step=1)
-    if st.button("Cancel Order"):
-        st.session_state.order_book.cancel_order(order_id)
+def order_rows(orders: list) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "ID": o.order_id,
+                "Price": o.price,
+                "Remaining": o.remaining,
+                "Original": o.quantity,
+            }
+            for o in orders
+        ],
+        columns=["ID", "Price", "Remaining", "Original"],
+    )
 
-# Show analytics
-st.subheader("Order Book Analytics")
-best_bid, best_ask = st.session_state.order_book.get_best_bid_ask()
-spread = round(best_ask - best_bid, 2) if best_bid and best_ask else None
+
+# ------------------------------------------------------------------- sidebar
+
+with st.sidebar:
+    st.header("Book controls")
+    if st.button("Load sample orders", help="Adds a few resting buy and sell orders."):
+        for side, price, quantity in SAMPLE_ORDERS:
+            book.add_order(side, price, quantity)
+    if st.button("Reset book", help="Clears all orders and trades."):
+        st.session_state.order_book = book = OrderBook()
+
+# ------------------------------------------------------------- order entry
+
+st.subheader("Place or cancel an order")
+action = st.selectbox("Action", ["Place Limit Order", "Place Market Order", "Cancel Order"])
+
+if action == "Place Limit Order":
+    with st.form("limit_order"):
+        side = st.selectbox("Side", [BUY, SELL])
+        price = st.number_input("Price", min_value=0.01, value=100.0, step=1.0, format="%.2f")
+        quantity = st.number_input("Quantity", min_value=1, value=10, step=1)
+        if st.form_submit_button("Submit limit order"):
+            show_result(book.add_order(side, price, quantity))
+
+elif action == "Place Market Order":
+    with st.form("market_order"):
+        side = st.selectbox("Side", [BUY, SELL])
+        quantity = st.number_input("Quantity", min_value=1, value=10, step=1)
+        if st.form_submit_button("Submit market order"):
+            show_result(book.add_order(side, None, quantity))
+
+else:
+    with st.form("cancel_order"):
+        order_id = st.number_input("Order ID to cancel", min_value=0, value=0, step=1)
+        if st.form_submit_button("Cancel order"):
+            if book.cancel_order(order_id):
+                st.success(f"Order {order_id} cancelled.")
+            else:
+                st.warning(f"Order {order_id} is not open (unknown, filled or already cancelled).")
+
+# ----------------------------------------------------------------- analytics
+
+st.subheader("Order book analytics")
+best_bid, best_ask, spread = book.best_bid(), book.best_ask(), book.spread()
+
+
+def fmt(value):
+    return "N/A" if value is None else f"{value:,.2f}"
+
 
 col1, col2, col3 = st.columns(3)
-col1.metric("Best Bid", best_bid if best_bid else "N/A")
-col2.metric("Best Ask", best_ask if best_ask else "N/A")
-col3.metric("Spread", spread if spread else "N/A")
+col1.metric("Best bid", fmt(best_bid))
+col2.metric("Best ask", fmt(best_ask))
+col3.metric("Spread", fmt(spread))
 
-# Show order book
-st.subheader("Current Order Book")
-buys, sells = st.session_state.order_book.get_book()
+# --------------------------------------------------------------------- depth
 
-buy_data = [{"ID": o.order_id, "Price": p, "Quantity": o.quantity} for p, o in buys]
-sell_data = [{"ID": o.order_id, "Price": p, "Quantity": o.quantity} for p, o in sells]
-
-col1, col2 = st.columns(2)
-col1.write("### Buy Orders")
-col1.dataframe(pd.DataFrame(buy_data))
-
-col2.write("### Sell Orders")
-col2.dataframe(pd.DataFrame(sell_data))
-
-# Show trade log
-st.subheader("Trade History")
-if st.session_state.order_book.trades:
-    trade_df = pd.DataFrame(st.session_state.order_book.trades)
-    st.dataframe(trade_df)
-    st.download_button("Download Trades CSV", trade_df.to_csv(index=False), "trades.csv", "text/csv")
+st.subheader("Market depth")
+bids, asks = book.depth()
+if bids or asks:
+    depth = (
+        pd.DataFrame({"Bids": dict(bids), "Asks": dict(asks)})
+        .sort_index()
+        .fillna(0)
+        .rename_axis("Price")
+    )
+    st.bar_chart(depth, color=["#2e8b57", "#c0392b"])
+    st.caption("Total open quantity at each price level.")
 else:
-    st.write("No trades yet.")
+    st.caption("The book is empty. Place an order or load the sample orders from the sidebar.")
+
+# -------------------------------------------------------------------- tables
+
+st.subheader("Current order book")
+buys, sells = book.get_book()
+left, right = st.columns(2)
+left.markdown("**Buy orders** (best first)")
+left.dataframe(order_rows(buys), hide_index=True)
+right.markdown("**Sell orders** (best first)")
+right.dataframe(order_rows(sells), hide_index=True)
+
+# ------------------------------------------------------------------- history
+
+st.subheader("Trade history")
+if book.trades:
+    trades = pd.DataFrame([asdict(t) for t in book.trades])
+    st.dataframe(trades.iloc[::-1], hide_index=True)  # newest first on screen
+    st.download_button(
+        "Download trades (CSV)",
+        trades.to_csv(index=False),
+        file_name="trades.csv",
+        mime="text/csv",
+    )
+else:
+    st.caption("No trades yet.")
