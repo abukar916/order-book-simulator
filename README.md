@@ -2,7 +2,7 @@
 
 An interactive limit order book built in Python. Place limit and market orders, watch them match by **price-time priority**, and inspect the book, the spread and the trade history. The matching engine is a standalone, tested module; the Streamlit app is a thin front end on top of it.
 
-![Screenshot of the simulator showing the order entry form, best bid/ask, depth chart, order tables and trade history](docs/screenshot.png)
+![Screenshot of the simulator showing the order entry form, best bid/ask, depth chart, order tables and trade history](/Users/abdullahi/order-book-simulator/screenshot.png)
 
 ## Features
 
